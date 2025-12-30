@@ -34,6 +34,10 @@ jobs:
   docker-build-job:
     needs: [setup-build-job]            # this job will run only after the Job 1(setup-build-job) is completed
     runs-on: ubuntu-latest        # Docker is preinstalled in this 
+    permissions:
+        contents: read
+        packages: write
+        
     if: github.ref == 'refs/heads/main'  # Main only (PRs skip Docker)
     
     steps:
@@ -96,4 +100,5 @@ jobs:
         docker stop test-app || true
         docker rm test-app || true
         docker rmi ghcr.io/gauravlone/enterprise-java-aws-demo:latest || true
+
 
