@@ -1,0 +1,98 @@
+name: CI/CD Pipeline - Enterprise Java AWS Demo
+#name gets shown in Actions tab + search results .the pipeline will get triger on code push and pull on main branch.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  #Job1: Maven Build → JAR Artifact
+  setup-build-job:
+    runs-on: ubuntu-latest       #this job will run on fresh VM which will use ubuntu
+    steps:
+    - name: Checkout source code
+      uses: actions/checkout@v4  #this downloads the GitHub repo
+    
+    - name: Setup JDK 17 (Eclipse Temurin)
+      uses: actions/setup-java@v4  
+      with:                       # a block for passing arguments (inputs) to the action to setup jdk 17.
+        java-version: '17'        # Java 17 
+        distribution: 'temurin'   # Official OpenJDK build 
+        cache: maven              # for fater execution time as the dependiceis will be cached next time no need to download again if found in cache
+    
+    - name: Build executable JAR
+      run: mvn clean package -DskipTests  # Compiles and  target/enterprise-java-aws-demo-1.0.0.jar
+    
+    - name: Upload JAR artifact to GitHub
+      uses: actions/upload-artifact@v4  #uploading compiled jar file as artifact to pass this jar for further use from one job to another .
+      with:                        
+        name: java-app-jar        # Artifact name for Job 2
+        path: target/*.jar        # Only JAR files (ignores source)
+
+  #Job 2: Docker Build → Push Github container registry
+  docker-build-job:
+    needs: setup-build-job            # this job will run only after the Job 1(setup-build-job) is completed
+    runs-on: ubuntu-latest        # Docker is preinstalled in this 
+    if: github.ref == 'refs/heads/main'  # Main only (PRs skip Docker)
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Download JAR from Job 1
+      uses: actions/download-artifact@v4
+      with:
+        name: java-app-jar        # Matches Job 1 upload
+    
+    - name: Login to GitHub Container Registry (GHCR)
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io         # ghcr.io = GitHub's Docker Hub
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}  # Auto-generated token by github...
+    
+    - name: Build & Push Docker image
+      uses: docker/build-push-action@v6
+      with:
+        context: .                # Build context = project root
+        file: ./Dockerfile        # Dockerfile created at root
+        push: true                # Push to GHCR (not local)
+        tags: |                   # Dual (|) tagging to identify the latest image by commit
+          ghcr.io/gauravlone/enterprise-java-aws-demo:latest
+          ghcr.io/gauravlone/enterprise-java-aws-demo:${{ github.sha }}
+    
+    - name: Print success message
+      run: echo " Docker image pushed to GHCR!"
+
+  # Job 3: Integration Test (Pull → Run → Health Check)
+  integration-test-job:
+    needs: [docker-build-job]          # Runs after Docker image exists
+    runs-on: ubuntu-latest       
+    
+    steps:
+    - name: Pull fresh Docker image from GHCR
+      run: docker pull ghcr.io/gauravlone/enterprise-java-aws-demo:latest
+    
+    - name: Run container 
+      run: |
+        docker run -d --name test-app -p 8080:8080 ghcr.io/gauravlone/enterprise-java-aws-demo:latest
+        echo " Waiting for Spring Boot startup..."
+        sleep 15                  # Spring Boot needs 10-15s startup thats why
+    
+    - name: Test /health endpoint 
+      run: |
+        echo "Testing health endpoint..."
+        curl -f http://localhost:8080/health | grep "healthy" || exit 1
+        echo "Health check passed!"
+        
+        echo " Testing root endpoint..."
+        curl -f http://localhost:8080/ | grep "Enterprise Java AWS Demo" || exit 1
+        echo "Integration test complete!"
+    
+    - name: Cleanup containers (Always runs)
+      if: always()                 # Pass OR fail
+      run: |
+        docker stop test-app || true
+        docker rm test-app || true
+        docker rmi ghcr.io/gauravlone/enterprise-java-aws-demo:latest || true
